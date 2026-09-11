@@ -1,7 +1,7 @@
 /**
  * Cloudflare Worker - Microsoft Edge TTS 服务代理
  *
- * @version 2.4.0 (稳定版)
+ * @version 2.4.1 (稳定修复版)
  * @description 实现了内部自动批处理机制，优雅地处理 Cloudflare 的子请求限制。
  * API 现在可以处理任何长度的文本，不会因为"子请求过多"而失败。
  * 这是最终的生产就绪版本。
@@ -12,6 +12,7 @@
  * - 智能批处理避免 Cloudflare 限制
  * - 兼容 OpenAI TTS API 格式
  * - 支持多种中英文语音
+ * - 自动处理 Base URL 结尾斜杠与多余斜杠
  */
 
 // =================================================================================
@@ -64,8 +65,11 @@ async function handleRequest(event) {
   if (request.method === 'OPTIONS') return handleOptions(request);
 
   const url = new URL(request.url);
+  // 【修复点 1】：标准化 pathname，防止多重斜杠导致 404 (如 //v1/audio/speech -> /v1/audio/speech)
+  const pathname = url.pathname.replace(/\/+/g, '/');
+
   // 处理HTML页面请求
-  if (url.pathname === '/' || url.pathname === '/index.html') {
+  if (pathname === '/' || pathname === '/index.html') {
     if (!htmlContent) htmlContent = getHtmlContent();
     return new Response(htmlContent, {
       headers: {
@@ -88,10 +92,10 @@ async function handleRequest(event) {
   }
 
   try {
-    // 路由分发
-    if (url.pathname === '/v1/audio/speech')
+    // 路由分发（基于标准化后的路径）
+    if (pathname === '/v1/audio/speech')
       return await handleSpeechRequest(request);
-    if (url.pathname === '/v1/models') return handleModelsRequest();
+    if (pathname === '/v1/models') return handleModelsRequest();
   } catch (err) {
     console.error('请求处理器错误:', err);
     return errorResponse(err.message, 500, 'internal_server_error');
@@ -629,7 +633,7 @@ function cleanText(text, options) {
     if (keywords.length > 0) {
       // 转义正则表达式特殊字符
       const escapedKeywords = keywords.map(k =>
-        k.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')
+        k.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\{{input}}')
       );
       const regex = new RegExp(escapedKeywords.join('|'), 'g');
       cleanedText = cleanedText.replace(regex, '');
@@ -704,7 +708,7 @@ function getHtmlContent() {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <title>🎙️ TTS 语音合成</title>
-  <!-- Google Fonts 国内镜像：fonts.loli.net（替换 fonts.googleapis.com 即可） -->
+  <!-- Google Fonts 国内镜像：fonts.loli.net -->
   <link rel="preconnect" href="https://fonts.loli.net" crossorigin />
   <link href="https://fonts.loli.net/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
@@ -720,7 +724,7 @@ function getHtmlContent() {
       --surface-inset:  #faf5ee;
       --header-bg:      linear-gradient(160deg, #fff8f0 0%, #ffffff 100%);
 
-      /* 主色 — 赤陶橙（降饱和，不刺眼） */
+      /* 主色 — 赤陶橙 */
       --primary:        #c25c18;
       --primary-light:  #fdf0e6;
       --primary-shadow: rgba(194, 92, 24, 0.18);
@@ -740,7 +744,7 @@ function getHtmlContent() {
       --text-muted:     #78716c;
       --text-subtle:    #a8a29e;
 
-      /* 边框 & 阴影（带暖色调） */
+      /* 边框 & 阴影 */
       --border:         #e8dfd4;
       --border-focus:   #e8620c;
       --shadow-sm:      0 1px 3px rgba(180,100,40,.08), 0 1px 2px rgba(0,0,0,.04);
@@ -843,7 +847,7 @@ function getHtmlContent() {
     }
 
     /* =====================================================================
-       Section cards (replaces <details>)
+       Section cards
        ===================================================================== */
     .section-card {
       border: 1px solid var(--border);
@@ -1016,7 +1020,7 @@ function getHtmlContent() {
     .btn-insert-pause:active { transform: scale(0.96); }
 
     /* =====================================================================
-       Textarea footer (char count + clear)
+       Textarea footer
        ===================================================================== */
     .textarea-footer {
       margin-top: 0.5rem;
@@ -1074,7 +1078,7 @@ function getHtmlContent() {
     .clear-btn:hover { background: var(--error-light); color: var(--error); }
 
     /* =====================================================================
-       Grid layout (voice / speed / pitch)
+       Grid layout
        ===================================================================== */
     .grid-layout {
       display: grid;
@@ -1209,7 +1213,6 @@ function getHtmlContent() {
       transform: none;
     }
 
-    /* 标准模式 — outline 次要按钮 */
     .btn-generate {
       background: var(--surface);
       color: var(--text);
@@ -1224,7 +1227,6 @@ function getHtmlContent() {
       box-shadow: var(--shadow-md);
     }
 
-    /* 流式模式 — 填充主按钮 */
     .btn-stream {
       background: var(--primary);
       color: #fff;
@@ -1237,7 +1239,6 @@ function getHtmlContent() {
       transform: translateY(-1px);
     }
 
-    /* 下载按钮 */
     .btn-download {
       background: var(--surface);
       color: var(--primary);
@@ -1308,15 +1309,6 @@ function getHtmlContent() {
     }
 
     @keyframes spin { to { transform: rotate(360deg); } }
-
-    /* =====================================================================
-       Divider
-       ===================================================================== */
-    .section-divider {
-      height: 1px;
-      background: var(--border);
-      margin: 1.5rem 0;
-    }
 
     /* =====================================================================
        Responsive
@@ -1433,7 +1425,6 @@ function getHtmlContent() {
           <div class="form-group">
             <label for="voice">音色</label>
             <select id="voice" v-model="form.voice" @change="saveForm">
-              <!-- 普通话女声 · 按热门程度排序 -->
               <optgroup label="普通话 · 女声">
                 <option value="zh-CN-XiaoxiaoNeural">晓晓（多风格 · 最热门）</option>
                 <option value="zh-CN-XiaoyiNeural">晓伊（活泼）</option>
@@ -1449,7 +1440,6 @@ function getHtmlContent() {
                 <option value="zh-CN-XiaoshuangNeural">晓双（儿童）</option>
                 <option value="zh-CN-XiaoyouNeural">晓悠（儿童）</option>
               </optgroup>
-              <!-- 普通话男声 · 按热门程度排序 -->
               <optgroup label="普通话 · 男声">
                 <option value="zh-CN-YunyangNeural">云扬（专业 · 最热门）</option>
                 <option value="zh-CN-YunxiNeural">云希（阳光）</option>
@@ -1461,7 +1451,6 @@ function getHtmlContent() {
                 <option value="zh-CN-YunyeNeural">云野（豪迈粗犷）</option>
                 <option value="zh-CN-YunxiaNeural">云夏（儿童）</option>
               </optgroup>
-              <!-- 地方方言 -->
               <optgroup label="地方方言">
                 <option value="zh-CN-liaoning-XiaobeiNeural">晓北（辽宁 · 女）</option>
                 <option value="zh-CN-liaoning-YunbiaoNeural">云彪（辽宁 · 男）</option>
@@ -1471,19 +1460,16 @@ function getHtmlContent() {
                 <option value="zh-CN-sichuan-YunxiNeural">云希（四川 · 男）</option>
                 <option value="zh-CN-guangxi-YunqiNeural">云琦（广西 · 男）</option>
               </optgroup>
-              <!-- 台湾普通话 -->
               <optgroup label="台湾普通话">
                 <option value="zh-TW-HsiaoChenNeural">曉臻（女）</option>
                 <option value="zh-TW-HsiaoYuNeural">曉雨（女）</option>
                 <option value="zh-TW-YunJheNeural">雲哲（男）</option>
               </optgroup>
-              <!-- 粤语 -->
               <optgroup label="粤语（香港）">
                 <option value="zh-HK-HiuMaanNeural">曉曼（女）</option>
                 <option value="zh-HK-HiuGaaiNeural">曉佳（女）</option>
                 <option value="zh-HK-WanLungNeural">雲龍（男）</option>
               </optgroup>
-              <!-- 英文女声 -->
               <optgroup label="英文 · 女声 (en-US)">
                 <option value="en-US-JennyNeural">Jenny（最热门）</option>
                 <option value="en-US-AriaNeural">Aria</option>
@@ -1498,7 +1484,6 @@ function getHtmlContent() {
                 <option value="en-US-JaneNeural">Jane</option>
                 <option value="en-US-AnaNeural">Ana（儿童）</option>
               </optgroup>
-              <!-- 英文男声 -->
               <optgroup label="英文 · 男声 (en-US)">
                 <option value="en-US-GuyNeural">Guy（最热门）</option>
                 <option value="en-US-DavisNeural">Davis</option>
@@ -1610,11 +1595,11 @@ function getHtmlContent() {
           </button>
         </div>
 
-      </div><!-- /.page-body -->
+      </div>
     </main>
   </div>
 
-  <!-- Vue 3 CDN (unpkg 在国内一般可访问) -->
+  <!-- Vue 3 CDN -->
   <script src="https://unpkg.com/vue@3.5.33/dist/vue.global.prod.js"></script>
 
   <script>
@@ -1672,15 +1657,17 @@ function getHtmlContent() {
             const saved = localStorage.getItem('tts_config');
             if (saved) {
               this.config = { ...this.config, ...JSON.parse(saved) };
-              if (this.config.baseUrl.endsWith('/')) {
-                this.config.baseUrl = this.config.baseUrl.slice(0, -1);
+              // 【修复点 2】：清理结尾所有斜杠
+              if (this.config.baseUrl) {
+                this.config.baseUrl = this.config.baseUrl.trim().replace(/\\/+$/, '');
               }
             }
           } catch (e) { console.warn('Failed to load config:', e); }
         },
         saveConfig() {
-          try { localStorage.setItem('tts_config', JSON.stringify(this.config)); }
-          catch (e) { console.warn('Failed to save config:', e); }
+          try { 
+            localStorage.setItem('tts_config', JSON.stringify(this.config)); 
+          } catch (e) { console.warn('Failed to save config:', e); }
         },
         loadForm() {
           try {
@@ -1723,8 +1710,9 @@ function getHtmlContent() {
           };
         },
         async generateSpeech(isStream) {
-          const baseUrl = this.config.baseUrl.trim();
-          const apiKey  = this.config.apiKey.trim();
+          // 【修复点 3】：发起请求前自动去掉末尾的所有 / 斜杠
+          const baseUrl = (this.config.baseUrl || '').trim().replace(/\\/+$/, '');
+          const apiKey  = (this.config.apiKey || '').trim();
           const text    = this.form.inputText.trim();
           if (!baseUrl || !apiKey || !text) {
             this.updateStatus('请填写 API 配置和输入文本', 'error');
